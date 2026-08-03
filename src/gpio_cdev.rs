@@ -20,6 +20,7 @@ const GPIO_V2_LINE_ATTR_ID_DEBOUNCE: u32 = 3;
 
 const GPIO_V2_GET_LINE_IOCTL: c_ulong = iowr::<GpioV2LineRequest>(0xB4, 0x07);
 const GPIO_V2_LINE_SET_VALUES_IOCTL: c_ulong = iowr::<GpioV2LineValues>(0xB4, 0x0F);
+const GPIO_V2_LINE_GET_VALUES_IOCTL: c_ulong = iowr::<GpioV2LineValues>(0xB4, 0x0E);
 
 const GPIO_V2_LINE_EVENT_RISING_EDGE: u32 = 1;
 const GPIO_V2_LINE_EVENT_FALLING_EDGE: u32 = 2;
@@ -214,6 +215,12 @@ impl GpioLine {
             timestamp_ns: raw_event.timestamp_ns,
         }))
     }
+
+    pub fn read_value(&mut self) -> io::Result<bool> {
+        let mut values = GpioV2LineValues { bits: 0, mask: 1 };
+        gpio_get_line_values(self.line.as_raw_fd(), &mut values)?;
+        Ok(values.bits & 1 != 0)
+    }
 }
 
 impl DigitalOutput for GpioLine {
@@ -325,6 +332,15 @@ fn gpio_set_line_values(line_fd: RawFd, values: &mut GpioV2LineValues) -> io::Re
         // SAFETY: line_fd is a GPIO line request fd and values points to a valid
         // gpio_v2_line_values-shaped buffer for the single requested output line.
         ioctl(line_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, values)
+    };
+    ioctl_result(rc)
+}
+
+fn gpio_get_line_values(line_fd: RawFd, values: &mut GpioV2LineValues) -> io::Result<()> {
+    let rc = unsafe {
+        // SAFETY: line_fd is a GPIO line request fd and values points to a valid
+        // gpio_v2_line_values-shaped buffer for the single requested line.
+        ioctl(line_fd, GPIO_V2_LINE_GET_VALUES_IOCTL, values)
     };
     ioctl_result(rc)
 }

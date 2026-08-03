@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{KeyConfig, TimeConfig};
-use crate::env_file::PinMap;
+use crate::env_file::{ButtonMode, PinMap};
 use crate::gpio_cdev::{GpioEdgeKind, GpioLine};
 use crate::oled::OledSignal;
 use crate::shutdown;
@@ -14,6 +14,7 @@ use crate::shutdown;
 const BUTTON_CONSUMER: &str = "hat_button";
 const BUTTON_DEBOUNCE: Duration = Duration::from_millis(10);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub struct ButtonRuntime {
@@ -37,12 +38,20 @@ impl ButtonRuntime {
             return Ok(None);
         };
 
-        let line = GpioLine::request_input_edges(
-            button_chip,
-            button_line,
-            BUTTON_DEBOUNCE,
-            BUTTON_CONSUMER,
-        )?;
+        let mode = pin_map.button_mode;
+        let line = match mode {
+            ButtonMode::Edge => GpioLine::request_input_edges(
+                button_chip,
+                button_line,
+                BUTTON_DEBOUNCE,
+                BUTTON_CONSUMER,
+            )?,
+            // The Penta HAT reads its button from an output held high, exactly
+            // as the original Radxa implementation does.
+            ButtonMode::OutputPoll => {
+                GpioLine::request_output(button_chip, button_line, true, BUTTON_CONSUMER)?
+            }
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let last_error = Arc::new(Mutex::new(None));
 
@@ -53,6 +62,7 @@ impl ButtonRuntime {
             thread::spawn(move || {
                 run_button_loop(
                     line,
+                    mode,
                     key_config,
                     time_config,
                     fan_enabled,
@@ -87,6 +97,7 @@ impl Drop for ButtonRuntime {
 
 fn run_button_loop(
     mut line: GpioLine,
+    mode: ButtonMode,
     key_config: KeyConfig,
     time_config: TimeConfig,
     fan_enabled: Arc<AtomicBool>,
@@ -95,8 +106,29 @@ fn run_button_loop(
     last_error: Arc<Mutex<Option<String>>>,
 ) {
     let mut classifier = ButtonClassifier::new(time_config);
+    let mut output_classifier = OutputPollClassifier::new(time_config);
 
     while !stop.load(Ordering::SeqCst) && !shutdown::requested() {
+        if mode == ButtonMode::OutputPoll {
+            match line.read_value() {
+                Ok(level) => {
+                    if let Some(gesture) = output_classifier.handle_level(level)
+                        && let Err(err) =
+                            run_button_action(gesture, &key_config, &fan_enabled, &oled_signal)
+                    {
+                        store_error(&last_error, err);
+                        break;
+                    }
+                }
+                Err(err) => {
+                    store_error(&last_error, err.to_string());
+                    break;
+                }
+            }
+            thread::sleep(OUTPUT_POLL_INTERVAL);
+            continue;
+        }
+
         let now = Instant::now();
         let timeout = classifier
             .next_wait(now)
@@ -132,6 +164,71 @@ fn run_button_loop(
                 break;
             }
         }
+    }
+}
+
+// The original Penta daemon samples an output driven high by the controller.
+// Preserve its minimum-stable-run semantics instead of treating noisy levels
+// as normal input edges.
+#[derive(Debug)]
+struct OutputPollClassifier {
+    high_for_click: usize,
+    low_for_press: usize,
+    runs: Vec<(bool, usize)>,
+}
+
+impl OutputPollClassifier {
+    fn new(time_config: TimeConfig) -> Self {
+        Self {
+            high_for_click: (time_config.twice * 10.0).max(1.0) as usize,
+            low_for_press: (time_config.press * 10.0).max(1.0) as usize,
+            runs: Vec::new(),
+        }
+    }
+
+    fn handle_level(&mut self, level: bool) -> Option<ButtonGesture> {
+        match self.runs.last_mut() {
+            Some((previous, count)) if *previous == level => *count += 1,
+            _ => self.runs.push((level, 1)),
+        }
+
+        if self.runs.len() > 5 {
+            self.runs.remove(0);
+        }
+
+        let gesture = if self.matches_press() {
+            Some(ButtonGesture::Press)
+        } else if self.matches_twice() {
+            Some(ButtonGesture::Twice)
+        } else if self.matches_click() {
+            Some(ButtonGesture::Click)
+        } else {
+            None
+        };
+
+        if gesture.is_some() {
+            self.runs.clear();
+        }
+
+        gesture
+    }
+
+    fn matches_press(&self) -> bool {
+        matches!(self.runs.as_slice(), [(true, _), (false, count)] if *count >= self.low_for_press)
+    }
+
+    fn matches_twice(&self) -> bool {
+        matches!(
+            self.runs.as_slice(),
+            [(true, _), (false, _), (true, _), (false, _), (true, count)] if *count >= 3
+        )
+    }
+
+    fn matches_click(&self) -> bool {
+        matches!(
+            self.runs.as_slice(),
+            [(true, _), (false, _), (true, count)] if *count >= self.high_for_click
+        )
     }
 }
 
@@ -423,6 +520,54 @@ mod tests {
             action_for_gesture(ButtonGesture::Press, &key_config),
             ButtonAction::Poweroff
         );
+    }
+
+    #[test]
+    fn output_poll_classifier_requires_stable_single_click_release() {
+        let mut classifier = OutputPollClassifier::new(TimeConfig {
+            twice: 0.7,
+            press: 1.8,
+        });
+
+        for _ in 0..3 {
+            assert_eq!(classifier.handle_level(true), None);
+        }
+        for _ in 0..2 {
+            assert_eq!(classifier.handle_level(false), None);
+        }
+        for _ in 0..6 {
+            assert_eq!(classifier.handle_level(true), None);
+        }
+        assert_eq!(classifier.handle_level(true), Some(ButtonGesture::Click));
+    }
+
+    #[test]
+    fn output_poll_classifier_prefers_double_click_before_single_click_timeout() {
+        let mut classifier = OutputPollClassifier::new(TimeConfig {
+            twice: 0.7,
+            press: 1.8,
+        });
+
+        for level in [
+            true, true, false, false, true, true, false, false, true, true,
+        ] {
+            assert_eq!(classifier.handle_level(level), None);
+        }
+        assert_eq!(classifier.handle_level(true), Some(ButtonGesture::Twice));
+    }
+
+    #[test]
+    fn output_poll_classifier_detects_long_press() {
+        let mut classifier = OutputPollClassifier::new(TimeConfig {
+            twice: 0.7,
+            press: 1.8,
+        });
+
+        assert_eq!(classifier.handle_level(true), None);
+        for _ in 0..17 {
+            assert_eq!(classifier.handle_level(false), None);
+        }
+        assert_eq!(classifier.handle_level(false), Some(ButtonGesture::Press));
     }
 
     #[test]

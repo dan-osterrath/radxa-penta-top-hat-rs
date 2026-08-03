@@ -1,3 +1,10 @@
+radxa-penta-top-hat-rs (1.0.1+local.2) stable; urgency=medium
+
+  * Add BUTTON_MODE=output-poll for Penta HAT button wiring.
+  * Preserve the original Radxa output-poll button gesture semantics.
+
+ -- Dan Osterrath <dan.osterrath@gmx.de>  Mon, 03 Aug 2026 18:22:00 +0200
+
 radxa-penta-top-hat-rs (1.0.1) stable; urgency=medium
 
   * Align the default CPU fan thresholds with the Raspberry Pi 5 active cooler.

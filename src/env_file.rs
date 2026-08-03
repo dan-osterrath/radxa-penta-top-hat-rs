@@ -11,11 +11,18 @@ pub struct PinMap {
     pub oled_i2c_device: Option<String>,
     pub button_chip: Option<String>,
     pub button_line: Option<u32>,
+    pub button_mode: ButtonMode,
     pub fan_chip: Option<String>,
     pub fan_line: Option<u32>,
     pub pwmchip: Option<String>,
     pub hardware_pwm: bool,
     pub raw: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ButtonMode {
+    Edge,
+    OutputPoll,
 }
 
 impl PinMap {
@@ -35,6 +42,7 @@ impl PinMap {
             oled_i2c_device: None,
             button_chip: None,
             button_line: None,
+            button_mode: ButtonMode::Edge,
             fan_chip: None,
             fan_line: None,
             pwmchip: None,
@@ -89,6 +97,21 @@ impl PinMap {
                 });
             }
         };
+        let button_mode = match raw
+            .get("BUTTON_MODE")
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("output-poll") => ButtonMode::OutputPoll,
+            Some("edge") | None => ButtonMode::Edge,
+            Some(value) => {
+                return Err(EnvFileError::Value {
+                    key: "BUTTON_MODE".to_string(),
+                    value: value.to_string(),
+                    expected: "edge or output-poll",
+                });
+            }
+        };
 
         Ok(Self {
             sda: raw.get("SDA").cloned(),
@@ -100,6 +123,7 @@ impl PinMap {
                 .cloned(),
             button_chip: raw.get("BUTTON_CHIP").cloned(),
             button_line,
+            button_mode,
             fan_chip: raw.get("FAN_CHIP").cloned(),
             fan_line,
             pwmchip: raw.get("PWMCHIP").cloned(),
@@ -203,6 +227,7 @@ mod tests {
         assert_eq!(pins.oled_i2c_device.as_deref(), Some("/dev/i2c-1"));
         assert_eq!(pins.button_chip.as_deref(), Some("/dev/gpiochip4"));
         assert_eq!(pins.button_line, Some(17));
+        assert_eq!(pins.button_mode, ButtonMode::Edge);
         assert_eq!(pins.fan_line, Some(27));
         assert!(!pins.hardware_pwm);
     }
