@@ -1,3 +1,9 @@
+radxa-penta-top-hat-rs (1.0.1+local.3) stable; urgency=medium
+
+  * Document BUTTON_MODE and the Penta HAT output-poll button wiring.
+
+ -- Dan Osterrath <dan.osterrath@gmx.de>  Mon, 03 Aug 2026 18:35:00 +0200
+
 radxa-penta-top-hat-rs (1.0.1+local.2) stable; urgency=medium
 
   * Add BUTTON_MODE=output-poll for Penta HAT button wiring.

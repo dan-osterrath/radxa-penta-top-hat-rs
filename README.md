@@ -97,6 +97,12 @@ ramp_down = 5
 - `[key]`: `click`, `twice`, and `press` assign actions to a single click,
   double click, and long press. Actions are `slider` (wake or next OLED page),
   `switch` (toggle fan control), `reboot`, `poweroff`, or `none`.
+- `BUTTON_MODE` in `/etc/rockpi-penta.env` selects how the configured button
+  GPIO is read. `edge` is the default and uses input edge events. Set
+  `BUTTON_MODE=output-poll` for Penta HAT variants whose button wiring is read
+  through a GPIO configured as an output held high; this preserves the original
+  Radxa daemon's 100 ms polling and gesture behavior. The setting requires
+  `BUTTON_CHIP` and `BUTTON_LINE` as usual.
 - `[time]`: `twice` is the double-click window in seconds; `press` is the hold
   time in seconds that qualifies as a long press.
 - `[oled]`: `rotate` turns the display orientation by 180 degrees; `f-temp`
@@ -114,6 +120,15 @@ ramp_down = 5
 Boolean options accept `true`/`false`, `yes`/`no`, `on`/`off`, or `1`/`0`.
 With `[fan_curve]` disabled, the daemon uses the original stepped fan behavior;
 with `[fan_drives]` disabled, only CPU temperature controls the fan.
+
+For a ROCK Pi 4 with the Penta SATA HAT top board, the button uses the
+output-poll mode. The relevant board mapping is:
+
+```ini
+BUTTON_CHIP=/dev/gpiochip4
+BUTTON_LINE=18
+BUTTON_MODE=output-poll
+```
 
 Use `--dry-run --once` to print one fan decision without controlling the fan.
 
