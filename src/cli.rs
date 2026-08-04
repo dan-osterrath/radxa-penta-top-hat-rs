@@ -220,6 +220,6 @@ mod tests {
         let args = Args::parse_from(["daemon", "--version"]).expect("version flag should parse");
 
         assert!(args.version);
-        assert_eq!(version(), "radxa-penta-top-hat-rs 1.0.1+local.3");
+        assert_eq!(version(), "radxa-penta-top-hat-rs 1.0.1+local.4");
     }
 }

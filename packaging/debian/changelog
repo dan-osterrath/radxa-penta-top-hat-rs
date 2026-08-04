@@ -1,3 +1,10 @@
+radxa-penta-top-hat-rs (1.0.1+local.4) stable; urgency=medium
+
+  * Debounce output-poll button levels before classifying gestures.
+  * Classify Penta HAT clicks from stable press and release transitions.
+
+ -- Dan Osterrath <dan.osterrath@gmx.de>  Tue, 04 Aug 2026 20:54:00 +0200
+
 radxa-penta-top-hat-rs (1.0.1+local.3) stable; urgency=medium
 
   * Document BUTTON_MODE and the Penta HAT output-poll button wiring.

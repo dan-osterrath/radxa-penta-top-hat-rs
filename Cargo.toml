@@ -1,6 +1,6 @@
 [package]
 name = "radxa-penta-top-hat-rs"
-version = "1.0.1+local.3"
+version = "1.0.1+local.4"
 edition = "2024"
 license = "MIT"
 description = "Low-memory Rust control daemon for the Radxa Penta SATA HAT top board"

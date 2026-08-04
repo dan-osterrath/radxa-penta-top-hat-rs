@@ -14,7 +14,8 @@ use crate::shutdown;
 const BUTTON_CONSUMER: &str = "hat_button";
 const BUTTON_DEBOUNCE: Duration = Duration::from_millis(10);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const OUTPUT_POLL_DEBOUNCE: Duration = Duration::from_millis(40);
 
 #[derive(Debug)]
 pub struct ButtonRuntime {
@@ -112,7 +113,7 @@ fn run_button_loop(
         if mode == ButtonMode::OutputPoll {
             match line.read_value() {
                 Ok(level) => {
-                    if let Some(gesture) = output_classifier.handle_level(level)
+                    if let Some(gesture) = output_classifier.handle_level(level, Instant::now())
                         && let Err(err) =
                             run_button_action(gesture, &key_config, &fan_enabled, &oled_signal)
                     {
@@ -167,68 +168,55 @@ fn run_button_loop(
     }
 }
 
-// The original Penta daemon samples an output driven high by the controller.
-// Preserve its minimum-stable-run semantics instead of treating noisy levels
-// as normal input edges.
 #[derive(Debug)]
 struct OutputPollClassifier {
-    high_for_click: usize,
-    low_for_press: usize,
-    runs: Vec<(bool, usize)>,
+    classifier: ButtonClassifier,
+    stable_level: Option<bool>,
+    candidate_level: Option<bool>,
+    candidate_since: Option<Instant>,
 }
 
 impl OutputPollClassifier {
     fn new(time_config: TimeConfig) -> Self {
         Self {
-            high_for_click: (time_config.twice * 10.0).max(1.0) as usize,
-            low_for_press: (time_config.press * 10.0).max(1.0) as usize,
-            runs: Vec::new(),
+            classifier: ButtonClassifier::new(time_config),
+            stable_level: None,
+            candidate_level: None,
+            candidate_since: None,
         }
     }
 
-    fn handle_level(&mut self, level: bool) -> Option<ButtonGesture> {
-        match self.runs.last_mut() {
-            Some((previous, count)) if *previous == level => *count += 1,
-            _ => self.runs.push((level, 1)),
-        }
-
-        if self.runs.len() > 5 {
-            self.runs.remove(0);
-        }
-
-        let gesture = if self.matches_press() {
-            Some(ButtonGesture::Press)
-        } else if self.matches_twice() {
-            Some(ButtonGesture::Twice)
-        } else if self.matches_click() {
-            Some(ButtonGesture::Click)
-        } else {
-            None
+    fn handle_level(&mut self, level: bool, now: Instant) -> Option<ButtonGesture> {
+        let Some(stable_level) = self.stable_level else {
+            self.stable_level = Some(level);
+            return None;
         };
 
-        if gesture.is_some() {
-            self.runs.clear();
+        if level == stable_level {
+            self.candidate_level = None;
+            self.candidate_since = None;
+        } else if self.candidate_level != Some(level) {
+            self.candidate_level = Some(level);
+            self.candidate_since = Some(now);
+        } else if self
+            .candidate_since
+            .is_some_and(|since| now.duration_since(since) >= OUTPUT_POLL_DEBOUNCE)
+        {
+            self.stable_level = Some(level);
+            self.candidate_level = None;
+            self.candidate_since = None;
+
+            let edge = if level {
+                ButtonEdge::Released
+            } else {
+                ButtonEdge::Pressed
+            };
+            if let Some(gesture) = self.classifier.handle_edge(edge, now) {
+                return Some(gesture);
+            }
         }
 
-        gesture
-    }
-
-    fn matches_press(&self) -> bool {
-        matches!(self.runs.as_slice(), [(true, _), (false, count)] if *count >= self.low_for_press)
-    }
-
-    fn matches_twice(&self) -> bool {
-        matches!(
-            self.runs.as_slice(),
-            [(true, _), (false, _), (true, _), (false, _), (true, count)] if *count >= 3
-        )
-    }
-
-    fn matches_click(&self) -> bool {
-        matches!(
-            self.runs.as_slice(),
-            [(true, _), (false, _), (true, count)] if *count >= self.high_for_click
-        )
+        self.classifier.handle_timeout(now)
     }
 }
 
@@ -523,51 +511,94 @@ mod tests {
     }
 
     #[test]
-    fn output_poll_classifier_requires_stable_single_click_release() {
+    fn output_poll_classifier_debounces_and_classifies_single_click() {
+        let t0 = Instant::now();
         let mut classifier = OutputPollClassifier::new(TimeConfig {
             twice: 0.7,
             press: 1.8,
         });
 
-        for _ in 0..3 {
-            assert_eq!(classifier.handle_level(true), None);
-        }
-        for _ in 0..2 {
-            assert_eq!(classifier.handle_level(false), None);
-        }
-        for _ in 0..6 {
-            assert_eq!(classifier.handle_level(true), None);
-        }
-        assert_eq!(classifier.handle_level(true), Some(ButtonGesture::Click));
+        assert_eq!(classifier.handle_level(true, t0), None);
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(20)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(true, t0 + Duration::from_millis(40)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(60)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(true, t0 + Duration::from_millis(120)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(true, t0 + Duration::from_millis(160)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(true, t0 + Duration::from_millis(861)),
+            Some(ButtonGesture::Click)
+        );
     }
 
     #[test]
-    fn output_poll_classifier_prefers_double_click_before_single_click_timeout() {
+    fn output_poll_classifier_classifies_double_click() {
+        let t0 = Instant::now();
         let mut classifier = OutputPollClassifier::new(TimeConfig {
             twice: 0.7,
             press: 1.8,
         });
 
-        for level in [
-            true, true, false, false, true, true, false, false, true, true,
+        assert_eq!(classifier.handle_level(true, t0), None);
+        for (milliseconds, level) in [
+            (20, false),
+            (60, false),
+            (80, true),
+            (120, true),
+            (200, false),
+            (240, false),
+            (260, true),
         ] {
-            assert_eq!(classifier.handle_level(level), None);
+            assert_eq!(
+                classifier.handle_level(level, t0 + Duration::from_millis(milliseconds)),
+                None
+            );
         }
-        assert_eq!(classifier.handle_level(true), Some(ButtonGesture::Twice));
+        assert_eq!(
+            classifier.handle_level(true, t0 + Duration::from_millis(300)),
+            Some(ButtonGesture::Twice)
+        );
     }
 
     #[test]
     fn output_poll_classifier_detects_long_press() {
+        let t0 = Instant::now();
         let mut classifier = OutputPollClassifier::new(TimeConfig {
             twice: 0.7,
             press: 1.8,
         });
 
-        assert_eq!(classifier.handle_level(true), None);
-        for _ in 0..17 {
-            assert_eq!(classifier.handle_level(false), None);
-        }
-        assert_eq!(classifier.handle_level(false), Some(ButtonGesture::Press));
+        assert_eq!(classifier.handle_level(true, t0), None);
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(20)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(60)),
+            None
+        );
+        assert_eq!(
+            classifier.handle_level(false, t0 + Duration::from_millis(1860)),
+            Some(ButtonGesture::Press)
+        );
     }
 
     #[test]
